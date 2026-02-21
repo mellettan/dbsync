@@ -6,8 +6,9 @@
 """
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
+from urllib.parse import urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 
@@ -60,3 +61,14 @@ class SyncConfig:
             prod_dsn=env["PROD_DB_DSN"],
             log_level=env.get("LOG_LEVEL", "INFO").upper(),
         )
+
+
+def mask_dsn(dsn: str) -> str:
+    """
+    Скрывает пароль в DSN перед записью в лог.
+    """
+    parts = urlsplit(dsn)
+    if not parts.password:
+        return dsn
+    netloc = parts.netloc.replace(f":{parts.password}@", ":***@", 1)
+    return urlunsplit(parts._replace(netloc=netloc))

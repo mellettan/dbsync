@@ -9,6 +9,7 @@
 import subprocess
 import sys
 from time import sleep
+
 from rich.console import Console
 from show_db import show_table
 
@@ -82,7 +83,9 @@ def main():
     4. Вставляет тестовые данные в обе базы (в тестовой - с внешними ключами).
     5. Выводит текущее состояние всех таблиц для визуальной проверки.
     """
-    console.print("[bold cyan]Сброс схемы и подготовка тестовой базы данных (TEST DB)[/bold cyan]")
+    console.print(
+        "[bold cyan]Сброс схемы и подготовка тестовой базы данных (TEST DB)[/bold cyan]"
+    )
     reset_schema("test-db", "test_user", "test")
     test_sql = """
     -- Создание таблицы пользователей в тестовой базе

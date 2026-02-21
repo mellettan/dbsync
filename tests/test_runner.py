@@ -1,12 +1,17 @@
-import pytest
-
-from typing import Any, Sequence
-
+from collections.abc import Sequence
+from typing import Any
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from dbsync.config import SyncConfig
 from dbsync.database import ColumnSchema, ForeignKeySchema, SchemaSnapshot, TableSchema
-from dbsync.runner import SchemaDiff, _compute_diff, _select_sync_column, _sync_data, run_sync
+from dbsync.runner import (
+    _compute_diff,
+    _select_sync_column,
+    _sync_data,
+    run_sync,
+)
 
 
 def _mk_table(
@@ -129,10 +134,10 @@ def test_run_sync_adds_missing_foreign_keys(monkeypatch) -> None:
     prod_snapshot = SchemaSnapshot.from_tables([prod_table])
 
     snapshots = iter([test_snapshot, prod_snapshot, prod_snapshot])
-    inspector_instances: list["FakeInspector"] = []
+    inspector_instances: list[Any] = []
 
     class FakeInspector:
-        def __init__(self, dsn: str) -> None:
+        def __init__(self, dsn: str, decider: Any = None) -> None:
             self.dsn = dsn
             self.added_foreign_keys: list[tuple[str, ForeignKeySchema]] = []
             inspector_instances.append(self)
@@ -156,7 +161,9 @@ def test_run_sync_adds_missing_foreign_keys(monkeypatch) -> None:
             self.added_foreign_keys.append((table_name, fk))
 
         # _sync_data helpers
-        def fetch_rows(self, table_name: str, columns: list[str]) -> list[dict[str, Any]]:
+        def fetch_rows(
+            self, table_name: str, columns: list[str]
+        ) -> list[dict[str, Any]]:
             return []
 
         def fetch_primary_key_values(
@@ -165,7 +172,10 @@ def test_run_sync_adds_missing_foreign_keys(monkeypatch) -> None:
             return set()
 
         def insert_rows(
-            self, table_name: str, columns: Sequence[str], rows: Sequence[dict[str, Any]]
+            self,
+            table_name: str,
+            columns: Sequence[str],
+            rows: Sequence[dict[str, Any]],
         ) -> int:
             return 0
 
@@ -182,7 +192,9 @@ def test_run_sync_adds_missing_foreign_keys(monkeypatch) -> None:
             return True
 
     monkeypatch.setattr("dbsync.runner.PostgresInspector", FakeInspector)
-    monkeypatch.setattr("dbsync.runner._select_sync_column", lambda *args, **kwargs: ("id",))
+    monkeypatch.setattr(
+        "dbsync.runner._select_sync_column", lambda *args, **kwargs: ("id",)
+    )
 
     config = SyncConfig(test_dsn="test", prod_dsn="prod")
     run_sync(config)
