@@ -17,7 +17,7 @@ dependencies = [
 dbsync = "dbsync.runner:main"
 
 [project.urls]
-Repository = "https://github.com/mellettan/test_18022026"
+Repository = "https://github.com/mellettan/dbsync"
 
 [dependency-groups]
 dev = [

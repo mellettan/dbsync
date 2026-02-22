@@ -1,6 +1,6 @@
 # dbsync
 
-[![CI](https://github.com/mellettan/test_18022026/actions/workflows/ci.yml/badge.svg)](https://github.com/mellettan/test_18022026/actions/workflows/ci.yml)
+[![CI](https://github.com/mellettan/dbsync/actions/workflows/ci.yml/badge.svg)](https://github.com/mellettan/dbsync/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11%20|%203.12%20|%203.13-3776AB?logo=python&logoColor=white)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-psycopg%203-4169E1?logo=postgresql&logoColor=white)
 
