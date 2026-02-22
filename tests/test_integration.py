@@ -109,7 +109,9 @@ def test_without_allow_drop_extra_objects_are_kept(databases: SyncConfig):
     )
 
 
-def test_second_run_has_nothing_to_change(databases: SyncConfig, capsys: pytest.CaptureFixture[str]):
+def test_second_run_has_nothing_to_change(
+    databases: SyncConfig, capsys: pytest.CaptureFixture[str]
+):
     run_sync(databases, AutoDecider(allow_drop=True, not_null_default="—"))
     capsys.readouterr()
 
