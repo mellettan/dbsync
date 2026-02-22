@@ -8,14 +8,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Sequence
-
-from loguru import logger
+from typing import Any
 
 import psycopg
+from loguru import logger
 from psycopg import sql
 from psycopg.rows import dict_row
+
+from .decisions import Decider, InteractiveDecider
 
 
 @dataclass(frozen=True)
@@ -52,7 +54,7 @@ class TableSchema:
     name: str
     columns: tuple[ColumnSchema, ...]
     primary_key: tuple[str, ...]
-    foreign_keys: tuple["ForeignKeySchema", ...] = ()
+    foreign_keys: tuple[ForeignKeySchema, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -71,17 +73,17 @@ class ForeignKeySchema:
 @dataclass(frozen=True)
 class SchemaSnapshot:
     """
-    Представляет снимок (snapshot) схемы базы данных, содержащий информацию обо всех таблицах.
+        Представляет снимок (snapshot) схемы базы данных, содержащий информацию обо всех таблицах.
 
-    Атрибуты:
-tables (Mapping[str, TableSchema]): Словарь, где ключом является имя таблицы,
-                                            а значением — объект `TableSchema`.
+        Атрибуты:
+    tables (Mapping[str, TableSchema]): Словарь, где ключом является имя таблицы,
+                                                а значением — объект `TableSchema`.
     """
 
     tables: Mapping[str, TableSchema]
 
     @classmethod
-    def from_tables(cls, tables: Iterable[TableSchema]) -> "SchemaSnapshot":
+    def from_tables(cls, tables: Iterable[TableSchema]) -> SchemaSnapshot:
         """
         Создает `SchemaSnapshot` из итерируемого объекта `TableSchema`.
 
@@ -124,7 +126,7 @@ SELECT
     rc.update_rule,
     rc.delete_rule,
     rc.match_option,
-    cols.ord AS column_position
+    cols.ordinality AS column_position
 FROM pg_constraint con
 JOIN pg_class rel ON rel.oid = con.conrelid
 JOIN pg_namespace nsp ON nsp.oid = con.connamespace
@@ -138,7 +140,7 @@ LEFT JOIN information_schema.referential_constraints rc
     AND rc.constraint_schema = nsp.nspname
 WHERE con.contype = 'f'
   AND nsp.nspname = 'public'
-ORDER BY rel.relname, con.conname, cols.ord;
+ORDER BY rel.relname, con.conname, cols.ordinality;
 """
 
 # SQL-запрос для получения информации о первичном ключе для всех таблиц в схеме 'public'.
@@ -165,14 +167,17 @@ class PostgresInspector:
     а также для вставки и обновления данных.
     """
 
-    def __init__(self, dsn: str) -> None:
+    def __init__(self, dsn: str, decider: Decider | None = None) -> None:
         """
         Инициализирует `PostgresInspector` с заданной строкой подключения.
 
         Аргументы:
             dsn (str): Строка подключения (DSN) к базе данных PostgreSQL.
+            decider (Decider | None): Кто решает, что делать при нарушении NOT NULL.
+                                      По умолчанию вопрос задаётся в терминале.
         """
         self._dsn = dsn
+        self._decider = decider or InteractiveDecider()
         # Словарь для хранения решений пользователя по обработке NOT NULL конфликтов.
         # Ключ: (имя_таблицы, имя_колонки), Значение: ("drop" | "default", значение_по_умолчанию | None)
         self._not_null_decisions: dict[tuple[str, str], tuple[str, str | None]] = {}
@@ -209,17 +214,44 @@ class PostgresInspector:
                     primary_keys.setdefault(row["table_name"], []).append(
                         row["column_name"]
                     )
+                cur.execute(FOREIGN_KEYS_QUERY)
+                foreign_key_rows = list(cur)
 
-        # Создаем объекты TableSchema из собранных данных.
+        foreign_keys = _group_foreign_keys(foreign_key_rows)
         tables = [
             TableSchema(
                 name=name,
                 columns=tuple(cols),
                 primary_key=tuple(primary_keys.get(name, [])),
+                foreign_keys=tuple(foreign_keys.get(name, [])),
             )
             for name, cols in columns_by_table.items()
         ]
         return SchemaSnapshot.from_tables(tables)
+
+    def add_foreign_key(self, table_name: str, fk: ForeignKeySchema) -> None:
+        """
+        Создаёт внешний ключ в таблице с теми же правилами ON UPDATE/ON DELETE и MATCH,
+        что и в исходной базе.
+
+        Аргументы:
+            table_name (str): Таблица, в которую добавляется ограничение.
+            fk (ForeignKeySchema): Описание внешнего ключа.
+        """
+        statement = sql.SQL(
+            "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({}){} "
+            "ON UPDATE {} ON DELETE {}"
+        ).format(
+            sql.Identifier(table_name),
+            sql.Identifier(fk.constraint_name),
+            sql.SQL(", ").join(sql.Identifier(col) for col in fk.columns),
+            sql.Identifier(fk.referenced_table),
+            sql.SQL(", ").join(sql.Identifier(col) for col in fk.referenced_columns),
+            sql.SQL(" MATCH FULL" if fk.match_option == "FULL" else ""),
+            sql.SQL(_referential_action(fk.on_update)),
+            sql.SQL(_referential_action(fk.on_delete)),
+        )
+        self._execute(statement)
 
     def list_tables(self) -> list[str]:
         """
@@ -231,10 +263,9 @@ class PostgresInspector:
         query = (
             "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public';"
         )
-        with psycopg.connect(self._dsn) as conn:
-            with conn.cursor() as cur:
-                cur.execute(query)
-                return [row[0] for row in cur.fetchall()]
+        with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            cur.execute(query)
+            return [row[0] for row in cur.fetchall()]
 
     def create_table(self, table: TableSchema) -> None:
         """
@@ -349,11 +380,10 @@ class PostgresInspector:
         statement = sql.SQL(
             "SELECT COUNT({col}) = COUNT(DISTINCT {col}) AND COUNT({col}) > 0 FROM {table}"
         ).format(col=sql.Identifier(column_name), table=sql.Identifier(table_name))
-        with psycopg.connect(self._dsn) as conn:
-            with conn.cursor() as cur:
-                cur.execute(statement)
-                row = cur.fetchone()
-                return row[0] if row else False
+        with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            cur.execute(statement)
+            row = cur.fetchone()
+            return row[0] if row else False
 
     def fetch_rows(
         self, table_name: str, columns: Sequence[str]
@@ -550,10 +580,9 @@ class PostgresInspector:
         self, table_name: str, column_name: str
     ) -> tuple[str, str | None]:
         """
-        Интерактивно запрашивает у пользователя решение по обработке конфликта NOT NULL.
+        Решение по конфликту NOT NULL: удалить ограничение или вставить значение по умолчанию.
 
-        Предлагает удалить ограничение NOT NULL или вставить значение по умолчанию.
-        Кэширует решение для повторного использования в рамках одной сессии.
+        Решение принимает `Decider` и кэшируется на время сессии.
 
         Аргументы:
             table_name (str): Имя таблицы, где произошел конфликт.
@@ -567,22 +596,7 @@ class PostgresInspector:
         if key in self._not_null_decisions:
             return self._not_null_decisions[key]
 
-        prompt = (
-            f'Столбец "{column_name}" в таблице "{table_name}" не может быть NULL.\n'
-            "Укажите действие: [d] удалить ограничение NOT NULL, [v] вставить значение по умолчанию: "
-        )
-        while True:
-            choice = input(prompt).strip().lower()
-            if choice in {"d", "v"}:
-                break
-            print("Введите d или v.")
-        if choice == "d":
-            decision = ("drop", None)
-        else:
-            default_value = input(
-                f"Введите значение по умолчанию для {table_name}.{column_name}: "
-            )
-            decision = ("default", default_value)
+        decision = self._decider.resolve_not_null(table_name, column_name)
         self._not_null_decisions[key] = decision
         return decision
 
@@ -665,3 +679,43 @@ class PostgresInspector:
             logger.debug("Выполнение SQL-запроса", sql=statement.as_string(conn))
             with conn.cursor() as cur:
                 cur.execute(statement)
+
+
+_REFERENTIAL_ACTIONS = frozenset(
+    {"NO ACTION", "RESTRICT", "CASCADE", "SET NULL", "SET DEFAULT"}
+)
+
+
+def _referential_action(rule: str | None) -> str:
+    """
+    Проверяет правило ON UPDATE/ON DELETE по белому списку перед подстановкой в SQL.
+    """
+    return rule if rule in _REFERENTIAL_ACTIONS else "NO ACTION"
+
+
+def _group_foreign_keys(
+    rows: Iterable[Mapping[str, Any]],
+) -> dict[str, list[ForeignKeySchema]]:
+    """
+    Собирает строки FOREIGN_KEYS_QUERY (по одной на колонку) в составные внешние ключи.
+    """
+    grouped: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault((row["table_name"], row["constraint_name"]), []).append(row)
+
+    result: dict[str, list[ForeignKeySchema]] = {}
+    for (table_name, constraint_name), parts in grouped.items():
+        parts.sort(key=lambda part: part["column_position"])
+        first = parts[0]
+        result.setdefault(table_name, []).append(
+            ForeignKeySchema(
+                constraint_name=constraint_name,
+                columns=tuple(part["column_name"] for part in parts),
+                referenced_table=first["referenced_table"],
+                referenced_columns=tuple(part["referenced_column"] for part in parts),
+                on_update=first["update_rule"],
+                on_delete=first["delete_rule"],
+                match_option=first["match_option"],
+            )
+        )
+    return result
